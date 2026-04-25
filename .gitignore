@@ -1,0 +1,7 @@
+.env
+client_secrets.json
+youtube_token.json
+sent_ids.json
+pending.json
+tmp/
+__pycache__/
