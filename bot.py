@@ -10,6 +10,7 @@ from zoneinfo import ZoneInfo
 from telegram import Bot, InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.constants import ParseMode
 from telegram.ext import Application, CallbackQueryHandler, ContextTypes
+from deep_translator import GoogleTranslator
 
 logging.basicConfig(
     level=logging.INFO,
@@ -38,11 +39,21 @@ KYIV_TZ    = ZoneInfo("Europe/Kyiv")
 HOUR_START = 8   # с 08:00
 HOUR_END   = 22  # до 22:00 (включительно, последний слот начинается в 22:xx не отправляется)
 
-RSS_FEEDS = [
-    "https://feeds.bbci.co.uk/russian/rss.xml",
-    "https://rss.dw.com/rdf/rss-ru-all",
-    # Добавьте свои RSS-ленты:
-    # "https://example.com/rss",
+RSS_FEEDS_RU = [
+    # Русскоязычные — перевод не нужен
+    "https://feeds.bbci.co.uk/russian/business/rss.xml",  # BBC Бизнес
+    "https://rss.dw.com/rdf/rss-ru-wirtschaft",            # DW Экономика
+    "https://ru.euronews.com/rss?level=theme&name=business", # Euronews Бизнес
+    "https://www.pravda.com.ua/rss/economics/",             # УП Экономика
+]
+
+RSS_FEEDS_EN = [
+    # Английские — будут переводиться автоматически
+    "https://www.forbes.com/business/feed/",               # Forbes
+    "https://feeds.bloomberg.com/technology/news.rss",     # Bloomberg
+    "https://inc.com/rss",                                  # Inc. Magazine
+    "https://hbr.org/feed",                                 # Harvard Business Review
+    "https://techcrunch.com/feed/",                         # TechCrunch
 ]
 
 SENT_FILE    = "sent_ids.json"
@@ -112,17 +123,32 @@ def extract_image(entry) -> str | None:
     return None
 
 
-def format_message(entry) -> str:
+def translate_to_ru(text: str) -> str:
+    """Переводит текст на русский если он не на русском."""
+    try:
+        if not text:
+            return text
+        translated = GoogleTranslator(source="auto", target="ru").translate(text[:4500])
+        return translated or text
+    except Exception as e:
+        logger.warning(f"Ошибка перевода: {e}")
+        return text
+
+
+def format_message(entry, translate: bool = False) -> str:
     title   = entry.get("title", "Без заголовка").strip()
     link    = entry.get("link", "")
     summary = entry.get("summary", "")
 
-    # Убираем HTML-теги из summary
     summary = re.sub(r"<[^>]+>", "", summary).strip()
+
+    if translate:
+        title   = translate_to_ru(title)
+        summary = translate_to_ru(summary[:500])
 
     if summary:
         summary = summary[:300].strip()
-        if len(re.sub(r"<[^>]+>", "", entry.get("summary", ""))) > 300:
+        if len(summary) >= 300:
             summary += "…"
         return f"📰 <b>{title}</b>\n\n{summary}\n\n<a href='{link}'>Читать далее →</a>"
     return f"📰 <b>{title}</b>\n\n<a href='{link}'>Читать далее →</a>"
@@ -290,17 +316,26 @@ def get_random_slots_for_hour(n: int = 2) -> list:
 
 
 async def fetch_new_entries(sent_ids: set, pending: dict) -> list:
-    """Читает все RSS-ленты и возвращает новые записи."""
     already_queued = set(pending.keys())
     new_entries = []
 
-    for feed_url in RSS_FEEDS:
+    for feed_url in RSS_FEEDS_RU:
         try:
             feed = feedparser.parse(feed_url)
             for entry in feed.entries:
                 eid = entry.get("id") or entry.get("link")
                 if eid and eid not in sent_ids and eid not in already_queued:
-                    new_entries.append((eid, entry))
+                    new_entries.append((eid, entry, False))  # False = не переводить
+        except Exception as e:
+            logger.error(f"Ошибка чтения {feed_url}: {e}")
+
+    for feed_url in RSS_FEEDS_EN:
+        try:
+            feed = feedparser.parse(feed_url)
+            for entry in feed.entries:
+                eid = entry.get("id") or entry.get("link")
+                if eid and eid not in sent_ids and eid not in already_queued:
+                    new_entries.append((eid, entry, True))  # True = переводить
         except Exception as e:
             logger.error(f"Ошибка чтения {feed_url}: {e}")
 
@@ -310,7 +345,6 @@ async def fetch_new_entries(sent_ids: set, pending: dict) -> list:
 
     new_entries.sort(key=parse_date)
     return new_entries
-
 
 async def rss_poller(app: Application):
     """
@@ -364,9 +398,9 @@ async def rss_poller(app: Application):
                 logger.info("Нет новых новостей для отправки.")
                 continue
 
-            eid, entry = entries[0]
-            text      = format_message(entry)
-            image_url = extract_image(entry)
+            eid, entry, need_translate = entries[0]
+text      = format_message(entry, translate=need_translate)
+image_url = extract_image(entry)
 
             try:
                 await send_for_moderation(bot, eid, text, image_url, pending)
