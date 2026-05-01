@@ -116,7 +116,6 @@ def extract_image(entry) -> str | None:
 
 def format_message(entry, translate: bool = False) -> str:
     title   = entry.get("title", "Без заголовка").strip()
-    link    = entry.get("link", "")
     summary = entry.get("summary", "")
     summary = re.sub(r"<[^>]+>", "", summary).strip()
 
@@ -128,8 +127,8 @@ def format_message(entry, translate: bool = False) -> str:
         summary = summary[:300].strip()
         if len(summary) >= 300:
             summary += "…"
-        return f"📰 <b>{title}</b>\n\n{summary}\n\n<a href='{link}'>Читать далее →</a>"
-    return f"📰 <b>{title}</b>\n\n<a href='{link}'>Читать далее →</a>"
+        return f"📰 <b>{title}</b>\n\n{summary}"
+    return f"📰 <b>{title}</b>"
 
 
 async def send_for_moderation(bot: Bot, entry_id: str, text: str, image_url: str | None, pending: dict):
@@ -211,11 +210,21 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 )
             sent_ids.add(entry_id)
             save_json(SENT_FILE, list(sent_ids))
-            await query.edit_message_text(
-                "✅ <b>Опубликовано!</b>\n\n" + item["text"],
-                parse_mode=ParseMode.HTML,
-                reply_markup=None,
-            )
+            try:
+                if item.get("image_url"):
+                    await query.edit_message_caption(
+                        caption="✅ <b>Опубликовано!</b>",
+                        parse_mode=ParseMode.HTML,
+                        reply_markup=None,
+                    )
+                else:
+                    await query.edit_message_text(
+                        "✅ <b>Опубликовано!</b>\n\n" + item["text"],
+                        parse_mode=ParseMode.HTML,
+                        reply_markup=None,
+                    )
+            except Exception:
+                await query.edit_message_reply_markup(reply_markup=None)
             logger.info(f"Опубликовано: {entry_id[:60]}")
 
             if VIDEO_ENABLED:
@@ -232,11 +241,21 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif action == "reject":
         sent_ids.add(entry_id)
         save_json(SENT_FILE, list(sent_ids))
-        await query.edit_message_text(
-            "🗑 <b>Отклонено.</b>\n\n" + item["text"],
-            parse_mode=ParseMode.HTML,
-            reply_markup=None,
-        )
+        try:
+            if item.get("image_url"):
+                await query.edit_message_caption(
+                    caption="🗑 <b>Отклонено.</b>",
+                    parse_mode=ParseMode.HTML,
+                    reply_markup=None,
+                )
+            else:
+                await query.edit_message_text(
+                    "🗑 <b>Отклонено.</b>\n\n" + item["text"],
+                    parse_mode=ParseMode.HTML,
+                    reply_markup=None,
+                )
+        except Exception:
+            await query.edit_message_reply_markup(reply_markup=None)
         logger.info(f"Отклонено: {entry_id[:60]}")
 
 
@@ -344,11 +363,17 @@ async def rss_poller(app: Application):
             text      = format_message(entry, translate=need_translate)
             image_url = extract_image(entry)
 
+            # Сразу помечаем как "в очереди" чтобы второй слот не взял ту же новость
+            pending[eid] = {"text": text, "image_url": image_url, "placeholder": True, "created_at": datetime.now().isoformat()}
+            save_pending(pending)
+
             try:
                 await send_for_moderation(bot, eid, text, image_url, pending)
                 logger.info(f"✅ Пост отправлен в {now_kyiv().strftime('%H:%M:%S')} (Киев)")
             except Exception as e:
                 logger.error(f"Ошибка при отправке на модерацию: {e}")
+                pending.pop(eid, None)
+                save_pending(pending)
 
         now = now_kyiv()
         next_hour = now.replace(minute=0, second=0, microsecond=0) + timedelta(hours=1)
